@@ -1,4 +1,8 @@
-FROM node:20-alpine
+FROM node:20-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvips-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -9,7 +13,5 @@ COPY . .
 
 # Create default storage directory
 RUN mkdir -p /data/uploads
-
-EXPOSE 4000
 
 CMD ["node", "server.js"]

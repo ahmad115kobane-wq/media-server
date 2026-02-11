@@ -3,7 +3,7 @@ const multer = require('multer');
 const cors = require('cors');
 const helmet = require('helmet');
 const sharp = require('sharp');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
@@ -38,7 +38,6 @@ app.use('/uploads', express.static(STORAGE_DIR, {
   etag: true,
   lastModified: true,
   setHeaders: (res, filePath) => {
-    // Set proper content type for images
     const ext = path.extname(filePath).toLowerCase();
     const mimeTypes = {
       '.jpg': 'image/jpeg',
@@ -51,7 +50,7 @@ app.use('/uploads', express.static(STORAGE_DIR, {
     if (mimeTypes[ext]) {
       res.setHeader('Content-Type', mimeTypes[ext]);
     }
-    res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
+    res.setHeader('Cache-Control', 'public, max-age=2592000');
   },
 }));
 
@@ -67,19 +66,24 @@ const authMiddleware = (req, res, next) => {
 // Multer config - memory storage for processing with sharp
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed'));
-    }
-  },
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
+function generateId() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
 // Upload endpoint
-app.post('/upload', authMiddleware, upload.single('image'), async (req, res) => {
+app.post('/upload', authMiddleware, async (req, res) => {
   try {
+    // Use multer as promise
+    await new Promise((resolve, reject) => {
+      upload.single('image')(req, res, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No image file provided' });
     }
@@ -89,29 +93,23 @@ app.post('/upload', authMiddleware, upload.single('image'), async (req, res) => 
       return res.status(400).json({ success: false, message: `Invalid folder. Use: ${dirs.join(', ')}` });
     }
 
-    const filename = `${uuidv4()}.webp`;
+    const filename = `${generateId()}.webp`;
     const filePath = path.join(STORAGE_DIR, folder, filename);
 
-    // Process image with sharp - convert to webp for smaller size
-    let sharpInstance = sharp(req.file.buffer);
+    // Process image with sharp - convert to webp
+    let pipeline = sharp(req.file.buffer);
+    const metadata = await pipeline.metadata();
 
-    // Get image metadata
-    const metadata = await sharpInstance.metadata();
-
-    // Resize if too large (max 1920px width)
     if (metadata.width > 1920) {
-      sharpInstance = sharpInstance.resize(1920, null, { withoutEnlargement: true });
+      pipeline = pipeline.resize(1920, null, { withoutEnlargement: true });
     }
 
-    // Convert to webp with good quality
-    await sharpInstance
-      .webp({ quality: 85 })
-      .toFile(filePath);
+    await pipeline.webp({ quality: 85 }).toFile(filePath);
 
-    // Get file stats
     const stats = fs.statSync(filePath);
-
     const imageUrl = `/uploads/${folder}/${filename}`;
+
+    console.log(`✅ Uploaded: ${imageUrl} (${formatBytes(stats.size)})`);
 
     res.json({
       success: true,
@@ -129,50 +127,6 @@ app.post('/upload', authMiddleware, upload.single('image'), async (req, res) => 
   }
 });
 
-// Upload multiple images
-app.post('/upload/multiple', authMiddleware, upload.array('images', 10), async (req, res) => {
-  try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ success: false, message: 'No image files provided' });
-    }
-
-    const folder = req.body.folder || 'general';
-    if (!dirs.includes(folder)) {
-      return res.status(400).json({ success: false, message: `Invalid folder. Use: ${dirs.join(', ')}` });
-    }
-
-    const results = [];
-
-    for (const file of req.files) {
-      const filename = `${uuidv4()}.webp`;
-      const filePath = path.join(STORAGE_DIR, folder, filename);
-
-      let sharpInstance = sharp(file.buffer);
-      const metadata = await sharpInstance.metadata();
-
-      if (metadata.width > 1920) {
-        sharpInstance = sharpInstance.resize(1920, null, { withoutEnlargement: true });
-      }
-
-      await sharpInstance.webp({ quality: 85 }).toFile(filePath);
-
-      const stats = fs.statSync(filePath);
-
-      results.push({
-        imageUrl: `/uploads/${folder}/${filename}`,
-        filename,
-        size: stats.size,
-        originalName: file.originalname,
-      });
-    }
-
-    res.json({ success: true, data: results });
-  } catch (error) {
-    console.error('Multiple upload error:', error);
-    res.status(500).json({ success: false, message: 'Failed to upload images' });
-  }
-});
-
 // Delete image
 app.delete('/delete', authMiddleware, async (req, res) => {
   try {
@@ -181,11 +135,9 @@ app.delete('/delete', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: 'imageUrl is required' });
     }
 
-    // Extract path from URL (remove /uploads/ prefix)
     const relativePath = imageUrl.replace('/uploads/', '');
     const filePath = path.join(STORAGE_DIR, relativePath);
 
-    // Security: ensure path is within STORAGE_DIR
     const resolvedPath = path.resolve(filePath);
     if (!resolvedPath.startsWith(path.resolve(STORAGE_DIR))) {
       return res.status(400).json({ success: false, message: 'Invalid path' });
@@ -203,6 +155,10 @@ app.delete('/delete', authMiddleware, async (req, res) => {
 });
 
 // Health check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', message: 'Media server is running' });
+});
+
 app.get('/health', (req, res) => {
   const storageExists = fs.existsSync(STORAGE_DIR);
   res.json({
