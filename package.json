@@ -1,8 +1,11 @@
 {
   "name": "media-server",
   "version": "1.0.0",
-  "description": "Media storage server for Sports Live app",
+  "description": "Media storage server for Sports Live app - images & videos",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
@@ -11,7 +14,6 @@
     "cors": "^2.8.5",
     "express": "^4.18.3",
     "helmet": "^8.1.0",
-    "multer": "^2.0.2",
-    "sharp": "^0.33.2"
+    "multer": "^2.0.2"
   }
 }

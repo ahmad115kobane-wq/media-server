@@ -2,7 +2,6 @@ const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
 const helmet = require('helmet');
-const sharp = require('sharp');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -16,9 +15,16 @@ const API_KEY = process.env.API_KEY || 'media-server-secret-key';
 // Storage directory - Railway persistent volume mounts at /data
 const STORAGE_DIR = process.env.STORAGE_DIR || '/data/uploads';
 
+// Allowed folders
+const FOLDERS = ['avatars', 'news', 'store', 'sliders', 'videos', 'general'];
+
+// Allowed file types
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+const VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo'];
+const ALLOWED_TYPES = [...IMAGE_TYPES, ...VIDEO_TYPES];
+
 // Ensure storage directories exist
-const dirs = ['avatars', 'news', 'store', 'sliders', 'general'];
-dirs.forEach(dir => {
+FOLDERS.forEach(dir => {
   const fullPath = path.join(STORAGE_DIR, dir);
   if (!fs.existsSync(fullPath)) {
     fs.mkdirSync(fullPath, { recursive: true });
@@ -26,9 +32,7 @@ dirs.forEach(dir => {
 });
 
 // Middleware
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
-}));
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors());
 app.use(express.json());
 
@@ -40,21 +44,18 @@ app.use('/uploads', express.static(STORAGE_DIR, {
   setHeaders: (res, filePath) => {
     const ext = path.extname(filePath).toLowerCase();
     const mimeTypes = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.svg': 'image/svg+xml',
+      '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.png': 'image/png', '.gif': 'image/gif',
+      '.webp': 'image/webp', '.svg': 'image/svg+xml',
+      '.mp4': 'video/mp4', '.webm': 'video/webm',
+      '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
     };
-    if (mimeTypes[ext]) {
-      res.setHeader('Content-Type', mimeTypes[ext]);
-    }
+    if (mimeTypes[ext]) res.setHeader('Content-Type', mimeTypes[ext]);
     res.setHeader('Cache-Control', 'public, max-age=2592000');
   },
 }));
 
-// Auth middleware for uploads
+// Auth middleware
 const authMiddleware = (req, res, next) => {
   const key = req.headers['x-api-key'] || req.query.key;
   if (key !== API_KEY) {
@@ -63,79 +64,137 @@ const authMiddleware = (req, res, next) => {
   next();
 };
 
-// Multer config - memory storage for processing with sharp
+// Multer config - 50MB for videos
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_TYPES.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type not allowed: ${file.mimetype}`));
+    }
+  },
 });
 
 function generateId() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-// Upload endpoint
-app.post('/upload', authMiddleware, async (req, res) => {
-  try {
-    // Use multer as promise
-    await new Promise((resolve, reject) => {
-      upload.single('image')(req, res, (err) => {
-        if (err) reject(err);
-        else resolve();
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Upload single file (image or video)
+app.post('/upload', authMiddleware, (req, res) => {
+  upload.single('image')(req, res, async (err) => {
+    try {
+      if (err) {
+        return res.status(400).json({ success: false, message: err.message });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: 'No file provided' });
+      }
+
+      const folder = req.body.folder || 'general';
+      if (!FOLDERS.includes(folder)) {
+        return res.status(400).json({ success: false, message: `Invalid folder. Use: ${FOLDERS.join(', ')}` });
+      }
+
+      const ext = path.extname(req.file.originalname).toLowerCase() || '.jpg';
+      const filename = `${generateId()}${ext}`;
+      const filePath = path.join(STORAGE_DIR, folder, filename);
+
+      // Save file
+      fs.writeFileSync(filePath, req.file.buffer);
+
+      const stats = fs.statSync(filePath);
+      const isVideo = VIDEO_TYPES.includes(req.file.mimetype);
+      const mediaUrl = `/uploads/${folder}/${filename}`;
+
+      console.log(`✅ ${isVideo ? 'Video' : 'Image'} uploaded: ${mediaUrl} (${formatBytes(stats.size)})`);
+
+      res.json({
+        success: true,
+        data: {
+          imageUrl: mediaUrl,
+          url: mediaUrl,
+          filename,
+          folder,
+          size: stats.size,
+          type: isVideo ? 'video' : 'image',
+          mimetype: req.file.mimetype,
+          originalName: req.file.originalname,
+        },
       });
-    });
-
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'No image file provided' });
+    } catch (error) {
+      console.error('Upload error:', error);
+      res.status(500).json({ success: false, message: 'Failed to upload file' });
     }
-
-    const folder = req.body.folder || 'general';
-    if (!dirs.includes(folder)) {
-      return res.status(400).json({ success: false, message: `Invalid folder. Use: ${dirs.join(', ')}` });
-    }
-
-    const filename = `${generateId()}.webp`;
-    const filePath = path.join(STORAGE_DIR, folder, filename);
-
-    // Process image with sharp - convert to webp
-    let pipeline = sharp(req.file.buffer);
-    const metadata = await pipeline.metadata();
-
-    if (metadata.width > 1920) {
-      pipeline = pipeline.resize(1920, null, { withoutEnlargement: true });
-    }
-
-    await pipeline.webp({ quality: 85 }).toFile(filePath);
-
-    const stats = fs.statSync(filePath);
-    const imageUrl = `/uploads/${folder}/${filename}`;
-
-    console.log(`✅ Uploaded: ${imageUrl} (${formatBytes(stats.size)})`);
-
-    res.json({
-      success: true,
-      data: {
-        imageUrl,
-        filename,
-        folder,
-        size: stats.size,
-        originalName: req.file.originalname,
-      },
-    });
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ success: false, message: 'Failed to upload image' });
-  }
+  });
 });
 
-// Delete image
-app.delete('/delete', authMiddleware, async (req, res) => {
+// Upload multiple files
+app.post('/upload/multiple', authMiddleware, (req, res) => {
+  upload.array('files', 10)(req, res, async (err) => {
+    try {
+      if (err) {
+        return res.status(400).json({ success: false, message: err.message });
+      }
+
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ success: false, message: 'No files provided' });
+      }
+
+      const folder = req.body.folder || 'general';
+      if (!FOLDERS.includes(folder)) {
+        return res.status(400).json({ success: false, message: `Invalid folder. Use: ${FOLDERS.join(', ')}` });
+      }
+
+      const results = [];
+      for (const file of req.files) {
+        const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+        const filename = `${generateId()}${ext}`;
+        const filePath = path.join(STORAGE_DIR, folder, filename);
+
+        fs.writeFileSync(filePath, file.buffer);
+        const stats = fs.statSync(filePath);
+        const isVideo = VIDEO_TYPES.includes(file.mimetype);
+
+        results.push({
+          imageUrl: `/uploads/${folder}/${filename}`,
+          url: `/uploads/${folder}/${filename}`,
+          filename,
+          size: stats.size,
+          type: isVideo ? 'video' : 'image',
+          originalName: file.originalname,
+        });
+      }
+
+      console.log(`✅ ${results.length} files uploaded to ${folder}`);
+      res.json({ success: true, data: results });
+    } catch (error) {
+      console.error('Multiple upload error:', error);
+      res.status(500).json({ success: false, message: 'Failed to upload files' });
+    }
+  });
+});
+
+// Delete file
+app.delete('/delete', authMiddleware, (req, res) => {
   try {
-    const { imageUrl } = req.body;
-    if (!imageUrl) {
-      return res.status(400).json({ success: false, message: 'imageUrl is required' });
+    const { imageUrl, url } = req.body;
+    const fileUrl = imageUrl || url;
+    if (!fileUrl) {
+      return res.status(400).json({ success: false, message: 'url is required' });
     }
 
-    const relativePath = imageUrl.replace('/uploads/', '');
+    const relativePath = fileUrl.replace('/uploads/', '');
     const filePath = path.join(STORAGE_DIR, relativePath);
 
     const resolvedPath = path.resolve(filePath);
@@ -145,12 +204,13 @@ app.delete('/delete', authMiddleware, async (req, res) => {
 
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
+      console.log(`🗑️ Deleted: ${fileUrl}`);
     }
 
-    res.json({ success: true, message: 'Image deleted' });
+    res.json({ success: true, message: 'File deleted' });
   } catch (error) {
     console.error('Delete error:', error);
-    res.status(500).json({ success: false, message: 'Failed to delete image' });
+    res.status(500).json({ success: false, message: 'Failed to delete file' });
   }
 });
 
@@ -171,31 +231,28 @@ app.get('/health', (req, res) => {
 // Storage stats
 app.get('/stats', authMiddleware, (req, res) => {
   try {
-    const stats = {};
+    const folderStats = {};
     let totalSize = 0;
     let totalFiles = 0;
 
-    dirs.forEach(dir => {
+    FOLDERS.forEach(dir => {
       const dirPath = path.join(STORAGE_DIR, dir);
       if (fs.existsSync(dirPath)) {
         const files = fs.readdirSync(dirPath);
         let dirSize = 0;
-        files.forEach(file => {
-          const fileStat = fs.statSync(path.join(dirPath, file));
-          dirSize += fileStat.size;
-        });
-        stats[dir] = { files: files.length, size: dirSize };
+        files.forEach(f => { dirSize += fs.statSync(path.join(dirPath, f)).size; });
+        folderStats[dir] = { files: files.length, size: dirSize, sizeFormatted: formatBytes(dirSize) };
         totalSize += dirSize;
         totalFiles += files.length;
       } else {
-        stats[dir] = { files: 0, size: 0 };
+        folderStats[dir] = { files: 0, size: 0, sizeFormatted: '0 Bytes' };
       }
     });
 
     res.json({
       success: true,
       data: {
-        folders: stats,
+        folders: folderStats,
         total: { files: totalFiles, size: totalSize, sizeFormatted: formatBytes(totalSize) },
       },
     });
@@ -204,15 +261,9 @@ app.get('/stats', authMiddleware, (req, res) => {
   }
 });
 
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`📸 Media server running on port ${PORT}`);
-  console.log(`📁 Storage directory: ${STORAGE_DIR}`);
+  console.log(`📁 Storage: ${STORAGE_DIR}`);
+  console.log(`📂 Folders: ${FOLDERS.join(', ')}`);
+  console.log(`🎬 Supported: images + videos (max 50MB)`);
 });
