@@ -32,8 +32,12 @@ FOLDERS.forEach(dir => {
 });
 
 // Middleware
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-app.use(cors());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 // Serve uploaded files as static
